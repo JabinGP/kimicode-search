@@ -1,0 +1,38 @@
+services:
+  kimi-coding-mcp:
+    build: .
+    container_name: kimi-coding-mcp
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    command:
+      - python
+      - server.py
+      - --transport
+      - streamable-http
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    expose:
+      - "8000"
+
+  caddy:
+    image: caddy:2
+    container_name: kimi-coding-mcp-caddy
+    restart: unless-stopped
+    depends_on:
+      - kimi-coding-mcp
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

@@ -1,0 +1,6 @@
+.git
+.ace-tool
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
