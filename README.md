@@ -43,7 +43,10 @@ https://your-domain.com/mcp
 
 ```json
 {
-  "url": "https://search.bilibili.com/all?keyword=食贫道"
+  "text_query": "食贫道 最新视频 2025 2026",
+  "limit": 10,
+  "enable_page_crawling": false,
+  "timeout_seconds": 30
 }
 ```
 
@@ -53,10 +56,7 @@ https://your-domain.com/mcp
 
 ```json
 {
-  "text_query": "食贫道 最新视频 2025 2026",
-  "limit": 10,
-  "enable_page_crawling": false,
-  "timeout_seconds": 30
+  "url": "https://search.bilibili.com/all?keyword=食贫道"
 }
 ```
 
@@ -183,13 +183,18 @@ https://kimi-mcp.example.com/mcp
 ```bash
 KIMI_API_KEY=sk-kimi-你的key
 KIMI_BASE_URL=https://api.kimi.com/coding/v1
-KIMI_USER_AGENT=KimiCLI/1.23.0
+KIMI_USER_AGENT=KimiCLI/1.24.0
 KIMI_MSH_PLATFORM=kimi_cli
-KIMI_MSH_VERSION=1.23.0
+KIMI_MSH_VERSION=1.24.0
 KIMI_DEVICE_NAME=YOUR-PC
 KIMI_DEVICE_MODEL=Windows 11 AMD64
 KIMI_OS_VERSION=10.0.26200
 KIMI_DEVICE_ID=自定义设备ID
+KIMI_LOG_DIR=logs
+KIMI_LOG_LEVEL=INFO
+KIMI_LOG_MAX_BYTES=5242880
+KIMI_LOG_BACKUP_COUNT=3
+KIMI_LOG_PREVIEW_BYTES=100
 MCP_TRANSPORT=streamable-http
 MCP_HOST=0.0.0.0
 MCP_PORT=8000
@@ -197,6 +202,15 @@ MCP_STREAMABLE_HTTP_PATH=/mcp
 ```
 
 如果没有显式设置 `KIMI_DEVICE_ID`，服务会优先读取 `~/.kimi/device_id`；读不到时才会按 `device_name` 生成一个稳定 UUID。
+
+日志默认写入 `logs/server.log`，并按大小轮转。日志会记录：
+
+- 调用的 endpoint
+- 入参预览（默认最多 100 字节）
+- 返回结果预览（默认最多 100 字节）
+- 状态码与耗时
+
+为了安全，`api_key`、`authorization`、`token`、`secret` 等敏感字段会自动脱敏。
 
 本地运行时可以参考 [.env.example](/D:/删除/git/request-head/.env.example)，带代理的 Docker 部署可以参考 [.env.production.example](/D:/删除/git/request-head/.env.production.example)。
 
@@ -217,5 +231,5 @@ docker run --rm -p 8000:8000 -e KIMI_API_KEY=sk-kimi-你的key kimi-coding-mcp
 
 ## 7. 说明
 
-- `kimi_search` 会把响应原样返回；如果响应是 JSON，会自动格式化。
-- `kimi_fetch` 默认按 `Accept: text/markdown` 请求，并把返回文本直接交给 MCP 客户端。
+- `kimi_search` 使用 `text_query`、`limit`、`enable_page_crawling`、`timeout_seconds` 请求搜索接口；如果响应是 JSON，会自动格式化。
+- `kimi_fetch` 使用 `url` 请求抓取接口，并默认按 `Accept: text/markdown` 返回文本。

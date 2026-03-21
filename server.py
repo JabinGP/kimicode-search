@@ -1,11 +1,14 @@
 import argparse
 import json
+import logging
 import os
 import platform
 import socket
+import time
 import urllib.error
 import urllib.request
 import uuid
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from mcp.server.fastmcp import Context, FastMCP
@@ -14,14 +17,20 @@ from mcp.server.fastmcp import Context, FastMCP
 SERVER_NAME = "kimi-coding-mcp"
 SERVER_VERSION = "0.2.0"
 DEFAULT_BASE_URL = "https://api.kimi.com/coding/v1"
-DEFAULT_USER_AGENT = "KimiCLI/1.23.0"
+DEFAULT_USER_AGENT = "KimiCLI/1.24.0"
 DEFAULT_MSH_PLATFORM = "kimi_cli"
-DEFAULT_MSH_VERSION = "1.23.0"
+DEFAULT_MSH_VERSION = "1.24.0"
 DEFAULT_TRANSPORT = "stdio"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
 DEFAULT_STREAMABLE_HTTP_PATH = "/mcp"
 REMOTE_API_KEY_HEADER = "x-kimi-api-key"
+DEFAULT_LOG_DIR = "logs"
+DEFAULT_LOG_FILE_NAME = "server.log"
+DEFAULT_LOG_LEVEL = "INFO"
+DEFAULT_LOG_MAX_BYTES = 5 * 1024 * 1024
+DEFAULT_LOG_BACKUP_COUNT = 3
+DEFAULT_LOG_PREVIEW_BYTES = 100
 
 
 class ToolCallError(Exception):
@@ -33,6 +42,17 @@ def env_flag(name: str, default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+
+    try:
+        return int(value)
+    except ValueError:
+        return default
 
 
 def normalize_api_key(value: str | None) -> str:
@@ -47,6 +67,87 @@ def normalize_api_key(value: str | None) -> str:
         return stripped.split(" ", 1)[1].strip()
 
     return stripped
+
+
+def mask_secret(value: str) -> str:
+    if not value:
+        return ""
+
+    if len(value) <= 8:
+        return "***"
+
+    return f"{value[:4]}***{value[-4:]}"
+
+
+def sanitize_log_value(value):
+    if isinstance(value, dict):
+        sanitized = {}
+        for key, item in value.items():
+            lowered_key = str(key).lower()
+            if any(token in lowered_key for token in ("api_key", "authorization", "token", "secret")):
+                sanitized[key] = mask_secret(str(item))
+            else:
+                sanitized[key] = sanitize_log_value(item)
+        return sanitized
+
+    if isinstance(value, list):
+        return [sanitize_log_value(item) for item in value]
+
+    if isinstance(value, tuple):
+        return tuple(sanitize_log_value(item) for item in value)
+
+    return value
+
+
+def preview_text_bytes(value: str, limit: int = DEFAULT_LOG_PREVIEW_BYTES) -> str:
+    encoded = value.encode("utf-8", errors="replace")
+    preview = encoded[:limit]
+    suffix = "" if len(encoded) <= limit else "...(truncated)"
+    return preview.decode("utf-8", errors="replace") + suffix
+
+
+def payload_log_text(payload) -> str:
+    sanitized_payload = sanitize_log_value(payload)
+    serialized = json.dumps(sanitized_payload, ensure_ascii=False, sort_keys=True)
+    return preview_text_bytes(serialized, env_int("KIMI_LOG_PREVIEW_BYTES", DEFAULT_LOG_PREVIEW_BYTES))
+
+
+def response_log_text(text: str) -> str:
+    return preview_text_bytes(text, env_int("KIMI_LOG_PREVIEW_BYTES", DEFAULT_LOG_PREVIEW_BYTES))
+
+
+def build_logger() -> logging.Logger:
+    logger = logging.getLogger(SERVER_NAME)
+    if logger.handlers:
+        return logger
+
+    logger.setLevel(getattr(logging, os.getenv("KIMI_LOG_LEVEL", DEFAULT_LOG_LEVEL).upper(), logging.INFO))
+    logger.propagate = False
+
+    formatter = logging.Formatter(
+        fmt="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+
+    log_dir = Path(os.getenv("KIMI_LOG_DIR", DEFAULT_LOG_DIR))
+    log_file = log_dir / DEFAULT_LOG_FILE_NAME
+
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        handler: logging.Handler = RotatingFileHandler(
+            log_file,
+            maxBytes=env_int("KIMI_LOG_MAX_BYTES", DEFAULT_LOG_MAX_BYTES),
+            backupCount=env_int("KIMI_LOG_BACKUP_COUNT", DEFAULT_LOG_BACKUP_COUNT),
+            encoding="utf-8",
+        )
+    except OSError:
+        handler = logging.StreamHandler()
+
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    return logger
+
+
+LOGGER = build_logger()
 
 
 def default_device_id(device_name: str) -> str:
@@ -146,6 +247,17 @@ class KimiCodingClient:
         self.ensure_ready()
         url = f"{self.base_url}/{endpoint.lstrip('/')}"
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        started_at = time.perf_counter()
+
+        LOGGER.info(
+            "kimi_request endpoint=%s url=%s accept=%s timeout=%s payload=%s",
+            endpoint,
+            url,
+            accept,
+            timeout,
+            payload_log_text(payload),
+        )
+
         request = urllib.request.Request(
             url=url,
             data=data,
@@ -157,20 +269,41 @@ class KimiCodingClient:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 content_type = response.headers.get("Content-Type", "text/plain; charset=utf-8")
                 body = response.read()
-                return format_tool_text(response.status, content_type, body)
+                formatted_text = format_tool_text(response.status, content_type, body)
+                elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+                LOGGER.info(
+                    "kimi_response endpoint=%s status=%s elapsed_ms=%s result_preview=%s",
+                    endpoint,
+                    response.status,
+                    elapsed_ms,
+                    response_log_text(formatted_text),
+                )
+                return formatted_text
         except urllib.error.HTTPError as exc:
             content_type = exc.headers.get("Content-Type", "text/plain; charset=utf-8")
             body = exc.read()
-            raise ToolCallError(format_tool_text(exc.code, content_type, body)) from exc
+            formatted_text = format_tool_text(exc.code, content_type, body)
+            elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+            LOGGER.warning(
+                "kimi_response endpoint=%s status=%s elapsed_ms=%s result_preview=%s",
+                endpoint,
+                exc.code,
+                elapsed_ms,
+                response_log_text(formatted_text),
+            )
+            raise ToolCallError(formatted_text) from exc
         except urllib.error.URLError as exc:
             reason = getattr(exc, "reason", exc)
+            elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+            LOGGER.warning(
+                "kimi_response endpoint=%s status=network_error elapsed_ms=%s result_preview=%s",
+                endpoint,
+                elapsed_ms,
+                response_log_text(f"请求失败: {reason}"),
+            )
             raise ToolCallError(f"请求失败: {reason}") from exc
 
-    def search(self, url: str):
-        payload = {"url": url}
-        return self.post("search", payload, "*/*", 30)
-
-    def fetch(
+    def search(
         self,
         text_query: str,
         limit: int = 10,
@@ -184,7 +317,11 @@ class KimiCodingClient:
             "timeout_seconds": int(timeout_seconds),
         }
         request_timeout = max(payload["timeout_seconds"] + 10, 30)
-        return self.post("fetch", payload, "text/markdown", request_timeout)
+        return self.post("search", payload, "*/*", request_timeout)
+
+    def fetch(self, url: str):
+        payload = {"url": url}
+        return self.post("fetch", payload, "text/markdown", 30)
 
 
 def create_server(args) -> FastMCP:
@@ -204,21 +341,9 @@ def create_server(args) -> FastMCP:
 
     @mcp.tool(
         name="kimi_search",
-        description="调用 Kimi 的 /coding/v1/search 接口，根据 URL 执行搜索。",
+        description="调用 Kimi 的 /coding/v1/search 接口，根据文本查询执行搜索。",
     )
-    def kimi_search(url: str, ctx: Context) -> str:
-        cleaned_url = url.strip()
-        if not cleaned_url:
-            raise ValueError("kimi_search 需要非空字符串参数 url。")
-
-        client = KimiCodingClient(api_key=resolve_request_api_key(ctx))
-        return client.search(cleaned_url)
-
-    @mcp.tool(
-        name="kimi_fetch",
-        description="调用 Kimi 的 /coding/v1/fetch 接口，根据文本查询抓取结果。",
-    )
-    def kimi_fetch(
+    def kimi_search(
         text_query: str,
         ctx: Context,
         limit: int = 10,
@@ -227,15 +352,27 @@ def create_server(args) -> FastMCP:
     ) -> str:
         cleaned_query = text_query.strip()
         if not cleaned_query:
-            raise ValueError("kimi_fetch 需要非空字符串参数 text_query。")
+            raise ValueError("kimi_search 需要非空字符串参数 text_query。")
 
         client = KimiCodingClient(api_key=resolve_request_api_key(ctx))
-        return client.fetch(
+        return client.search(
             text_query=cleaned_query,
             limit=limit,
             enable_page_crawling=enable_page_crawling,
             timeout_seconds=timeout_seconds,
         )
+
+    @mcp.tool(
+        name="kimi_fetch",
+        description="调用 Kimi 的 /coding/v1/fetch 接口，根据 URL 抓取结果。",
+    )
+    def kimi_fetch(url: str, ctx: Context) -> str:
+        cleaned_url = url.strip()
+        if not cleaned_url:
+            raise ValueError("kimi_fetch 需要非空字符串参数 url。")
+
+        client = KimiCodingClient(api_key=resolve_request_api_key(ctx))
+        return client.fetch(cleaned_url)
 
     return mcp
 
@@ -281,6 +418,14 @@ def parse_args():
 
 def main():
     args = parse_args()
+    LOGGER.info(
+        "server_start transport=%s host=%s port=%s streamable_http_path=%s log_dir=%s",
+        args.transport,
+        args.host,
+        args.port,
+        args.streamable_http_path,
+        os.getenv("KIMI_LOG_DIR", DEFAULT_LOG_DIR),
+    )
     mcp = create_server(args)
     mcp.run(transport=args.transport)
 
