@@ -4,6 +4,7 @@ import logging
 import os
 import platform
 import socket
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -131,16 +132,19 @@ def build_logger() -> logging.Logger:
     log_dir = Path(os.getenv("KIMI_LOG_DIR", DEFAULT_LOG_DIR))
     log_file = log_dir / DEFAULT_LOG_FILE_NAME
 
-    try:
-        log_dir.mkdir(parents=True, exist_ok=True)
-        handler: logging.Handler = RotatingFileHandler(
-            log_file,
-            maxBytes=env_int("KIMI_LOG_MAX_BYTES", DEFAULT_LOG_MAX_BYTES),
-            backupCount=env_int("KIMI_LOG_BACKUP_COUNT", DEFAULT_LOG_BACKUP_COUNT),
-            encoding="utf-8",
-        )
-    except OSError:
-        handler = logging.StreamHandler()
+    if os.getenv("VERCEL"):
+        handler: logging.Handler = logging.StreamHandler(sys.stdout)
+    else:
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+            handler = RotatingFileHandler(
+                log_file,
+                maxBytes=env_int("KIMI_LOG_MAX_BYTES", DEFAULT_LOG_MAX_BYTES),
+                backupCount=env_int("KIMI_LOG_BACKUP_COUNT", DEFAULT_LOG_BACKUP_COUNT),
+                encoding="utf-8",
+            )
+        except OSError:
+            handler = logging.StreamHandler()
 
     handler.setFormatter(formatter)
     logger.addHandler(handler)
